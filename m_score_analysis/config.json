@@ -1,0 +1,10 @@
+{
+    "fn_by_experiment":{
+        "MI_Young":"data/20200319/200319_TinaSing_MI_YoungCells_TPM_All_MitoRemoved.txt",
+        "MII_Young":"data/20200319/190925_TinaSing_MII_YoungCells_TPM_All_MitoRemoved.txt",
+        "Early_Young":"data/20200319/200319_TinaSing_Early_YoungCells_TPM_All_MitoRemoved.txt",
+        "Starvation_Young":"data/20200319/200319_TinaSing_Starvation_YoungCells_TPM_All_MitoRemoved.txt",
+        "Late_Young":"data/20200319/200319_TinaSing_Late_YoungCells_TPM_All_MitoRemoved.txt"
+    },
+    "p_significant":0.05
+}

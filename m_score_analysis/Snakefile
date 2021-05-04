@@ -1,0 +1,165 @@
+import pdb
+import pandas as pd
+from itertools import *
+
+import statsmodels.api as sa
+import statsmodels.formula.api as sfa
+import scikit_posthocs as sp
+import numpy as np
+
+configfile: "config.json"
+
+def get_inputs(wildcards):
+    inputs = []
+    for k,v in config["fn_by_experiment"].items():
+        inputs.append("output/{exp}.m_scores.txt".format(exp=k))
+        inputs.append("output/{exp}.mean_values.txt".format(exp=k))
+        inputs.append("output/individual_outputs/{exp}.m_scores_w_means.txt".format(exp=k))
+        inputs.append("output/individual_outputs/{exp}.m_scores_w_replicates.txt".format(exp=k))
+        inputs.append("output/individual_outputs/{exp}.p_values.txt".format(exp=k))
+    return inputs
+
+rule all:
+    input:
+       "output/summaries/summary.m_scores_w_means.txt",
+       "output/summaries/summary.m_scores_w_replicates.txt",
+       "output/summaries/summary.p_values.txt" 
+
+rule combine:
+    input:
+        get_inputs
+    output:
+       "output/summaries/summary.p_values.txt",
+       "output/summaries/summary.m_scores_w_means.txt",
+       "output/summaries/summary.m_scores_w_replicates.txt"
+    run:    
+        p_val_ts = []
+        m_score_ts = []
+        m_score_ts_reps = []
+        for k,v in config["fn_by_experiment"].items():
+            fn_p_val = ("output/individual_outputs/{exp}.p_values.txt".format(exp=k))
+            fn_m_score = ("output/individual_outputs/{exp}.m_scores_w_means.txt".format(exp=k))
+            fn_m_score_reps = ("output/individual_outputs/{exp}.m_scores_w_replicates.txt".format(exp=k))
+
+            p_val_t = pd.read_table(fn_p_val, header=0, sep="\t")
+            p_val_t["exp_cond"] =  k
+            p_val_ts.append(p_val_t)
+
+            m_score_t = pd.read_table(fn_m_score, header=0, sep="\t")
+            m_score_t["exp_cond"] = k
+            m_score_ts.append(m_score_t)
+            
+            m_score_t_rep = pd.read_table(fn_m_score_reps, header=0, sep="\t")
+            m_score_t_rep["exp_cond"] = k
+            m_score_ts_reps.append(m_score_t_rep)
+        
+        t_p_val = pd.concat(p_val_ts)
+        t_m_score = pd.concat(m_score_ts)
+        t_m_score_reps = pd.concat(m_score_ts_reps)
+
+        t_p_val.to_csv(output[0], index=False, sep="\t")
+        t_m_score.to_csv(output[1], index=False, sep="\t")
+        t_m_score_reps.to_csv(output[2], index=False, sep="\t")
+
+def m_score(deltas):
+    s = np.sum(deltas>0)-np.sum(deltas<0)
+    
+    t = np.tile(deltas,(1000,1))
+    rsign = ((np.random.rand(1000,deltas.shape[0])>0.5)*2)-1
+    rnd_deltas = t*rsign
+    dist = np.sum(rnd_deltas>0,1)-np.sum(rnd_deltas<0,1)
+    mu = np.mean(dist)
+    sd = np.std(dist)
+
+    MZ=(s-mu)/sd
+    return s, MZ
+
+
+rule get_m_scores:
+    input:
+        "output/{exp}.p_values.txt"
+    output:
+        "output/{exp}.m_scores.txt"
+    run:
+        t = pd.read_csv(input[0], sep="\t")
+        outrows = [] 
+        for grp, df in t.groupby(["condition","gene_id","gene_name"]):
+            cond, gid, gname = grp
+            sig_df = df[df['p_value']<config['p_significant']]
+            if sig_df.shape[0] >0:
+                m, MZ = m_score(sig_df['delta'].values)            
+            else:
+                m, MZ = 0,0
+            outrows.append({"condition":cond,
+                            "gene_id":gid,
+                            "gene_name":gname,
+                            "m":m,
+                            "MZ":MZ})
+        tout = pd.DataFrame(outrows)
+        tout.to_csv(output[0], sep="\t", index=False)
+
+rule simple_mean_table:
+    input:
+        "output/{exp}.m_scores.txt"
+    output:
+        "output/individual_outputs/{exp}.m_scores_w_means.txt",
+        "output/individual_outputs/{exp}.m_scores_w_replicates.txt"
+    run:
+        fn_input = config['fn_by_experiment'][wildcards.exp]
+        t = pd.read_csv(fn_input, sep="\t")
+        t = t.melt(id_vars=["gene_id","gene_short_name"], var_name="sample")
+        t['condition'], t['day'], t['replicate'] = t['sample'].str.split("_",2).str
+        t['day'] = t['day'].str.replace("Day","").astype(int)
+        t_mu = t.groupby(["gene_id", "gene_short_name", "condition","day"]).mean()
+        
+        MZ_table = pd.read_csv(input[0], sep="\t")
+        t_all = pd.merge(t_mu.reset_index(),
+                         MZ_table, 
+                         left_on = ["gene_id","gene_short_name","condition"], 
+                         right_on = ["gene_id","gene_name", "condition"]) 
+        t_all_w_replicates = pd.merge(t.reset_index(),
+                                      MZ_table, 
+                                      left_on = ["gene_id","gene_short_name","condition"], 
+                                      right_on = ["gene_id","gene_name", "condition"]) 
+        t_all.to_csv(output[0], sep="\t", index=False)
+        t_all_w_replicates.to_csv(output[1], sep="\t", index=False)
+
+
+rule get_P_values:
+    output:
+        "output/{exp}.p_values.txt"
+    run:
+        fn_input = config['fn_by_experiment'][wildcards.exp]
+        t = pd.read_csv(fn_input, sep="\t")
+
+        #condition, day, replicate
+        #gene_id gene_short_name condition t1 t2 p_value
+        samples = t.columns[2:] 
+        t = t.melt(id_vars=["gene_id","gene_short_name"], var_name="sample")
+        t['condition'], t['day'], t['replicate'] = t['sample'].str.split("_",2).str
+        t['day'] = t['day'].str.replace("Day","").astype(int)
+        all_pairs = [p for p in combinations(t['day'].unique(),2)]
+        
+        outrows = []
+
+        for grp, df in t.groupby(["condition","gene_id","gene_short_name"]):
+            cond, gid, gname = grp
+            pvals = sp.posthoc_ttest(df, val_col="value", group_col="day")
+            means = df.groupby("day").mean()
+            for pair in all_pairs:
+                p = pvals[pair[0]][pair[1]]
+                #mu1, mu2 = means.ix[pair[0]].values[0], means.ix[pair[1]].values[0]
+                mu1, mu2 = means.loc[pair[0]].values[0], means.loc[pair[1]].values[0]
+                assert pair[0] < pair[1]
+                outrows.append({"condition":cond,
+                                "gene_id":gid,
+                                "gene_name":gname,
+                                "time1":pair[0],
+                                "time2":pair[1],
+                                "mu1":mu1,
+                                "mu2":mu2,
+                                "delta":mu2-mu1,
+                                "p_value":p})
+        tout = pd.DataFrame(outrows)
+        tout.to_csv(output[0], sep="\t", index=False)
+                                
